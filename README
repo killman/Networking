@@ -11,7 +11,7 @@ Gentoo + squid + nginx + videocache + prometheus QoS
 
 Install:
 
-git clone https://Killman@github.com/Killman/Networking.git
+https://Killman@github.com/Killman/Networking.git
 
 
 1.- Use the folder 'build' to install Prometheus QoS and
