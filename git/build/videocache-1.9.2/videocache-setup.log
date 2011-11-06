@@ -1,0 +1,43 @@
+2011-10-30 17:13:48,730 INFO Directory /etc/httpd/conf.d already exists.
+2011-10-30 17:13:48,730 INFO Directory /etc already exists.
+2011-10-30 17:13:48,730 INFO Directory /usr/share already exists.
+2011-10-30 17:13:48,730 INFO Directory /usr/share/man/man8 already exists.
+2011-10-30 17:13:48,730 INFO Directory /usr/sbin already exists.
+2011-10-30 17:13:48,731 INFO Directory /var/log/videocache already exists.
+2011-10-30 17:13:48,732 INFO Changed ownership of /var/spool/videocache/tmp .
+2011-10-30 17:13:48,732 INFO Directory /var/spool/videocache/tmp already exists.
+2011-10-30 17:13:48,732 INFO Changed ownership of /var/spool/videocache/youtube .
+2011-10-30 17:13:48,732 INFO Directory /var/spool/videocache/youtube already exists.
+2011-10-30 17:13:48,733 INFO Changed ownership of /var/spool/videocache/metacafe .
+2011-10-30 17:13:48,733 INFO Directory /var/spool/videocache/metacafe already exists.
+2011-10-30 17:13:48,733 INFO Changed ownership of /var/spool/videocache/dailymotion .
+2011-10-30 17:13:48,733 INFO Directory /var/spool/videocache/dailymotion already exists.
+2011-10-30 17:13:48,734 INFO Changed ownership of /var/spool/videocache/google .
+2011-10-30 17:13:48,734 INFO Directory /var/spool/videocache/google already exists.
+2011-10-30 17:13:48,734 INFO Changed ownership of /var/spool/videocache/redtube .
+2011-10-30 17:13:48,734 INFO Directory /var/spool/videocache/redtube already exists.
+2011-10-30 17:13:48,734 INFO Changed ownership of /var/spool/videocache/xtube .
+2011-10-30 17:13:48,735 INFO Directory /var/spool/videocache/xtube already exists.
+2011-10-30 17:13:48,735 INFO Changed ownership of /var/spool/videocache/vimeo .
+2011-10-30 17:13:48,735 INFO Directory /var/spool/videocache/vimeo already exists.
+2011-10-30 17:13:48,735 INFO Changed ownership of /var/spool/videocache/wrzuta .
+2011-10-30 17:13:48,736 INFO Directory /var/spool/videocache/wrzuta already exists.
+2011-10-30 17:13:48,736 INFO Changed ownership of /var/spool/videocache/youporn .
+2011-10-30 17:13:48,736 INFO Directory /var/spool/videocache/youporn already exists.
+2011-10-30 17:13:48,736 INFO Changed ownership of /var/spool/videocache/soapbox .
+2011-10-30 17:13:48,736 INFO Directory /var/spool/videocache/soapbox already exists.
+2011-10-30 17:13:48,737 INFO Changed ownership of /var/spool/videocache/tube8 .
+2011-10-30 17:13:48,737 INFO Directory /var/spool/videocache/tube8 already exists.
+2011-10-30 17:13:48,737 INFO Changed ownership of /var/spool/videocache/tvuol .
+2011-10-30 17:13:48,737 INFO Directory /var/spool/videocache/tvuol already exists.
+2011-10-30 17:13:48,738 INFO Changed ownership of /var/spool/videocache/bliptv .
+2011-10-30 17:13:48,738 INFO Directory /var/spool/videocache/bliptv already exists.
+2011-10-30 17:13:48,738 INFO Changed ownership of /var/spool/videocache/break .
+2011-10-30 17:13:48,738 INFO Directory /var/spool/videocache/break already exists.
+2011-10-30 17:13:48,740 INFO Removed already existing directory /usr/share/videocache .
+2011-10-30 17:13:48,745 INFO Copied source directory ./videocache/ to /usr/share/videocache .
+2011-10-30 17:13:48,746 INFO Copied file ./videocache-sysconfig.conf to /etc/videocache.conf .
+2011-10-30 17:13:48,792 INFO Copied file ./scripts/vccleaner to /usr/sbin/vccleaner .
+2011-10-30 17:13:48,792 INFO Copied file ./update-vc to /usr/sbin/update-vc .
+2011-10-30 17:13:48,841 INFO Copied file ./videocache.8.gz to /usr/share/man/man8/videocache.8.gz .
+2011-10-30 17:13:48,842 INFO Generated config file for Apache webserver in file /etc/httpd/conf.d/videocache.conf .
