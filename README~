@@ -1,9 +1,12 @@
 ----------------------------------------------------
 Enterprise Linux system administration
 
+Copyright by dkcorp.ec Inc.
+
 mail: killman@dkcorp.ec
 ----------------------------------------------------
-WebCache
+Software for ISP
+Gentoo + squid + nginx + videocache + prometheus QoS
 ----------------------------------------------------
 
 Install:
@@ -11,7 +14,8 @@ Install:
 https://Killman@github.com/Killman/Networking.git
 
 
-1.- Use the folder 'build' to install.
+1.- Use the folder 'build' to install Prometheus QoS and
+videocache.
 
 2.- Copy the configurations on your system.
 
