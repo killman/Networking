@@ -1,0 +1,41 @@
+INSTALAÇÃO
+==========
+
+PRÉ-REQUISITOS
+--------------
+=> Squid2 >= v2.7 (ainda não disponível para Squid3)
+Para melhores resultados, o Squid deve estar compilado com a diretiva --enable-http-violations.
+
+Algumas versões podem apresentar problemas. Leia o leiame.txt antes de instalar.
+
+INSTALAÇÃO
+----------
+
+1. colocar o arquivo inComum em /usr/lib/squid e o inComum.conf em /etc/squid/
+
+# cp ./inComum /usr/lib/squid/
+# cp ./inComum.conf /etc/squid/
+
+2. torná-lo executável
+
+# chmod +x /usr/lib/squid/inComum
+
+3. mudar o dono para o mesmo do squid (geralmente proxy.proxy):
+
+# chown proxy.proxy /usr/lib/squid/inComum
+# chown proxy.proxy /etc/squid/inComum.conf
+
+4. configurar inComum.conf
+
+Mude, se quiser, as seguinte opções:
+-storeurl_rewrite_children (número de instâncias)
+-maximum_object_size (tamanho máximo dos objetos do cache)
+
+5. configure o programa no squid.conf
+
+Para configurar, adicione a seguinte linha no squid.conf:
+
+include /etc/squid/inComum.conf
+
+IMPORTANTE: a linha DEVE ser inserida ANTES de qualquer outra configuração.
+(Ou quase: deve ficar ao menos antes da acl QUERY e das outras refresh_patterns).

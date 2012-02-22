@@ -1,0 +1,956 @@
+#!/usr/bin/env python
+#
+# (C) Copyright 2008-2011 Kulbir Saini <saini@saini.co.in>
+#
+# For more information check http://cachevideos.com/
+#
+
+__author__ = """Kulbir Saini <saini@saini.co.in>"""
+__docformat__ = 'plaintext'
+
+from common import *
+from error_codes import *
+from vcdaemon import VideocacheDaemon
+from vcoptions import VideocacheOptions
+from vcsysinfo import *
+
+from optparse import OptionParser
+from SimpleXMLRPCServer import SimpleXMLRPCServer
+from xmlrpclib import ServerProxy
+
+import cgi
+import cookielib
+import logging
+import pickle
+import pwd
+import socket
+import statvfs
+import sys
+import threading
+import time
+import traceback
+import urllib2
+import urlparse
+
+# Cookie processor and default socket timeout
+cj = cookielib.CookieJar()
+urllib2.install_opener(urllib2.build_opener(urllib2.HTTPCookieProcessor(cj)))
+socket.setdefaulttimeout(90)
+
+def info(params = {}):
+    if o.enable_scheduler_log:
+        params.update({ 'logformat' : o.scheduler_logformat, 'timeformat' : o.timeformat, 'levelname' : logging.getLevelName(logging.INFO), 'process_id' : process_id })
+        o.vcs_logger.info(build_message(params))
+
+def error(params = {}):
+    if o.enable_scheduler_log:
+        params.update({ 'logformat' : o.scheduler_logformat, 'timeformat' : o.timeformat, 'levelname' : logging.getLevelName(logging.ERROR), 'process_id' : process_id })
+        o.vcs_logger.error(build_message(params))
+
+def warn(params = {}):
+    if o.enable_scheduler_log:
+        params.update({ 'logformat' : o.scheduler_logformat, 'timeformat' : o.timeformat, 'levelname' : logging.getLevelName(logging.WARN), 'process_id' : process_id })
+        o.vcs_logger.debug(build_message(params))
+
+def trace(params = {}):
+    if o.enable_trace_log:
+        params.update({ 'logformat' : o.trace_logformat, 'timeformat' : o.timeformat, 'process_id' : process_id })
+        o.trace_logger.info(build_message(params))
+
+def connection():
+    global video_pool
+    try:
+        video_pool.ping()
+    except Exception, e:
+        try:
+            video_pool = ServerProxy(o.rpc_url)
+            video_pool.ping()
+            info({ 'code' : RPC_CONNECT, 'message' : 'Connected to RPC server.'})
+        except Exception, e:
+            error({ 'code' : RPC_CONNECT_ERR, 'message' : 'Could not connect to RPC server (videocache scheduler) at ' + o.rpc_host + ':' + str(o.rpc_port) + '. Please check scheduler status. If needed, restart scheduler using \'vc-scheduler -s restart\' command.', 'debug' : str(e)})
+            trace({ 'code' : RPC_CONNECT_ERR, 'message' : traceback.format_exc() })
+
+class VideoPool:
+    scores = {}
+    queue = {}
+    active = {}
+    systems = []
+    time_threshold = 15
+    last_dump = 0
+    dump_threshold = 120
+    disk_space = {}
+    disk_space_last_update = 0
+    disk_space_update_threshold = 300
+    last_used_dir = 0
+
+    def __init__(self):
+        pass
+
+    def ping(self):
+        return True
+
+    def load_queue(self):
+        for dir in o.base_dir_list:
+            queue_file = os.path.join(dir, o.queue_dump_file)
+            if os.path.isfile(queue_file):
+                try:
+                    [scores, queue] = pickle.load(file(queue_file, 'r'))
+                    self.scores = scores
+                    self.queue = queue
+                    for (video_id, score) in self.scores.items():
+                        self.scores[video_id] = self.scores[video_id] + 1
+                    return True
+                except Exception, e:
+                    warn( { 'code' : QUEUE_LOAD_WARN, 'message' : 'Unable to load video queue from dump file at ' + queue_file + '.', 'debug' : str(e) } )
+                    trace( { 'code' : QUEUE_LOAD_WARN, 'message' : traceback.format_exc() } )
+        return False
+
+    def dump_queue(self, now = False):
+        if now or int(time.time() - self.last_dump) > self.dump_threshold:
+            self.last_dump = time.time()
+            queue_dump_string = pickle.dumps([self.scores, self.queue])
+            for dir in o.base_dir_list:
+                queue_file = os.path.join(dir, o.queue_dump_file)
+                try:
+                    file(queue_file, 'w').write(queue_dump_string)
+                except Exception, e:
+                    warn( { 'code' : QUEUE_DUMP_WARN, 'message' : 'Unable to dump video queue to dump file at ' + queue_file + '.', 'debug' : str(e) } )
+                    trace( { 'code' : QUEUE_DUMP_WARN, 'message' : traceback.format_exc() } )
+        return True
+
+    def add_system(self, new_system = {}):
+        sys_info = { 'id' : o.id, 'email' : o.client_email, 'version' : o.version }
+        sys_info.update(get_all_info())
+        for system in [new_system, sys_info]:
+            if system != {} and system not in self.systems:
+                self.systems.append(system)
+        return True
+
+    def get_systems(self):
+        self.add_system()
+        return self.systems
+
+    def get_active_videos(self):
+        return self.active.keys()
+
+    def get_video_scores(self):
+        return self.scores
+
+    def get_video_queue(self):
+        return self.queue
+
+    def add_videos(self, videos = {}):
+        info( { 'code' : VIDEOS_RECEIVED, 'message' : 'Received ' + str(len(videos)) + ' videos from Videocache.' } )
+
+        videos_in_queue = len(self.scores)
+        if videos_in_queue - o.max_cache_queue_size >= 0:
+            self.remove_least_popular(videos_in_queue - o.max_cache_queue_size + 1)
+
+        for video_id in videos:
+            for params in videos[video_id]:
+                self.add_video(video_id, params)
+        return True
+
+    def add_video(self, video_id, params):
+        if video_id not in self.queue:
+            self.queue[video_id] = params
+            self.scores[video_id] = 1
+        else:
+            old_data = self.queue[video_id]
+            try:
+                if params['client_ip'] == old_data['client_ip'] and (int(params['access_time']) - int(old_data['access_time'])) > self.time_threshold:
+                    self.inc_score(video_id)
+                    self.queue[video_id].update( { 'access_time' : params['access_time'] } )
+            except Exception, e:
+                self.inc_score(video_id)
+        return True
+
+    def get_score(self, video_id):
+        """Get the score of video represented by video_id."""
+        if video_id in self.scores:
+            return self.scores[video_id]
+        else:
+            return 0
+
+    def set_score(self, video_id, score = 1):
+        """Set the priority score of a video_id."""
+        if video_id in self.scores:
+            self.scores[video_id] = score
+        return True
+
+    def inc_score(self, video_id, incr = 1):
+        """Increase the priority score of video represented by video_id."""
+        if video_id in self.scores:
+            self.scores[video_id] += incr
+        return True
+
+    def dec_score(self, video_id, decr = 1):
+        """Decrease the priority score of video represented by video_id."""
+        if video_id in self.scores:
+            self.scores[video_id] -= decr
+
+    def get_popular(self):
+        """Return the video_id of the most frequently access video."""
+        vk = [(v,k) for k,v in self.scores.items()]
+        if len(vk) != 0:
+            video_id = sorted(vk, reverse=True)[0][1]
+            return video_id
+        return False
+
+    def get_least_popular(self, count = 1):
+        """Get `count` number of least popular videos"""
+        vk = [(v, k) for k, v in self.scores.items()]
+        if len(vk) != 0:
+            return [k for v, k in sorted(vk)[:count]]
+        return []
+
+    def remove_least_popular(self, count = 1):
+        """Remove `count` number of least popular videos fromt the queue."""
+        for video_id in self.get_least_popular(count):
+            self.remove(video_id)
+
+    def get_details(self, video_id):
+        """Return the details of a particular video represented by video_id."""
+        if video_id in self.queue.keys():
+            return self.queue[video_id]
+        return False
+
+    def remove_from_queue(self, video_id):
+        """Dequeue a video_id from the download queue."""
+        if video_id in self.queue:
+            self.queue.pop(video_id)
+        if video_id in self.scores:
+            self.scores.pop(video_id)
+        return True
+
+    def remove_url_from_queue(self, video_id, url):
+        """Dequeue a url for a video_id from the download queue."""
+        if video_id in self.queue:
+            if url in self.queue[video_id]['urls']:
+                self.queue[video_id]['urls'].remove(url)
+        return True
+
+    def remove(self, video_id):
+        """Remove video_id from queue as well as active connection list."""
+        return self.remove_from_queue(video_id) and self.remove_conn(video_id)
+
+    def remove_url(self, video_id, url):
+        """Remove url from url list for a video_id."""
+        if len(self.queue[video_id]['urls']) == 1:
+            return self.remove(video_id)
+        else:
+            return self.remove_url_from_queue(video_id, url)
+
+    def flush(self):
+        """Flush the queue and reinitialize everything."""
+        self.queue = {}
+        self.scores = {}
+        self.active = {}
+        return True
+
+    def update_disk_space(self, now = False):
+        if now or int(time.time() - self.disk_space_last_update) > self.disk_space_update_threshold:
+            self.disk_space_last_update = time.time()
+            for dir in o.base_dir_list:
+                disk_stat = os.statvfs(dir)
+                space_available = disk_stat[statvfs.F_BSIZE] * disk_stat[statvfs.F_BAVAIL] / (1024*1024.0)
+                self.disk_space[dir] = { 'free_space' : space_available, 'use' : True }
+                if space_available < o.disk_avail_threshold:
+                    self.disk_space[dir].update( { 'use' : False } )
+
+    def get_next_cache_dir(self):
+        self.update_disk_space()
+        if o.base_dir_selection == 1:
+            for dir in o.base_dir_list:
+                if self.disk_space[dir]['use']:
+                    return dir
+        elif o.base_dir_selection == 2:
+            for dir in o.base_dir_list[(self.last_used_dir + 1):] + o.base_dir_list[:(self.last_used_dir + 1)]:
+                if self.disk_space[dir]['use']:
+                    self.last_used_dir = o.base_dir_list.index(dir)
+                    return dir
+        elif o.base_dir_selection == 3:
+            vk = [(v['free_space'], k) for k, v in self.disk_space.items()]
+            for v, dir in sorted(vk, reverse = True):
+                if self.disk_space[dir]['use']:
+                    self.last_used_dir = o.base_dir_list.index(dir)
+                    return dir
+
+        warn({'code' : CACHE_DIR_FULL, 'message' : 'All your cache directories have reached the disk availability threshold. Please check if you have a crontab for vc-cleaner program. Check http://cachevideos.com/#vc-cleaner for more details.'})
+        return False
+
+    def start_cache_thread(self, video_id, params):
+        """Start a new thread which will cache the vdieo"""
+        new_thread = threading.Thread(target = cache, name = str(video_id), kwargs = { 'params' : params })
+        self.set_score(video_id, 0)
+        self.add_conn(video_id, new_thread)
+        new_thread.start()
+        info( { 'code' : CACHE_THREAD_START, 'website_id' : params['website_id'], 'video_id' : params['video_id'], 'client_ip' : params['client_ip'], 'message' : 'Starting cache thread.' } )
+        return True
+
+    def clean_threads(self):
+        """Cleanup threads which have exitted."""
+        for (video_id, thread) in self.active.items():
+            try:
+                if not thread.isAlive():
+                    self.remove(video_id)
+                    info( { 'code' : CACHE_THREAD_REMOVE, 'video_id' : video_id, 'message' : 'Cache thread completed. Removing from active list.' } )
+            except Exception, e:
+                error( { 'code' : CACHE_THREAD_REMOVE_ERR, 'message' : 'Unable to remove cache thread from thread list', 'debug' : str(e), 'video_id' : video_id } )
+                trace( { 'code' : CACHE_THREAD_REMOVE_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id } )
+        return True
+
+    def schedule(self):
+        try:
+            self.clean_threads()
+            self.dump_queue()
+            if o.offline_mode or not is_caching_time():
+                return False
+            if self.get_conn_number() < o.max_cache_processes:
+                video_id = self.get_popular()
+                if video_id != False and self.is_active(video_id) == False and self.get_score(video_id) >= o.hit_threshold:
+                    params = self.get_details(video_id)
+                    if params != False:
+                        next_cache_dir = self.get_next_cache_dir()
+                        if next_cache_dir is False:
+                            return False
+                        else:
+                            params.update({ 'cur_cache_dir' : next_cache_dir })
+                        self.start_cache_thread(video_id, params)
+                        return True
+                elif self.is_active(video_id) == True:
+                    self.set_score(video_id, 0)
+                    return False
+        except Exception, e:
+            error( { 'code' : VIDEO_SCHEDULE_ERR, 'message' : 'Could not find out the next video to schedule.', 'debug' : str(e) } )
+            trace( { 'code' : VIDEO_SCHEDULE_ERR, 'message' : traceback.format_exc() } )
+            return False
+        return False
+
+    # Functions related download scheduling.
+    # Have to mess up things in single class because python
+    # RPCServer doesn't allow to register multiple instances.
+    def add_conn(self, video_id, thread):
+        """Add video_id to active connections list."""
+        if video_id not in self.active:
+            self.active[video_id] = thread
+        return True
+
+    def get_conn_number(self):
+        """Return the number of currently active connections."""
+        return len(self.active)
+
+    def is_active(self, video_id):
+        """Returns whether a connection is active or not."""
+        return video_id in self.active
+
+    def remove_conn(self, video_id):
+        """Remove video_id from active connections list."""
+        if video_id in self.active:
+            self.active.pop(video_id)
+        return True
+
+class VideoPoolRPCServer(SimpleXMLRPCServer):
+
+    allow_reuse_address = True
+
+    def __init__(self, *args, **kwargs):
+        self.finished = False
+        SimpleXMLRPCServer.__init__(self, *args, **kwargs)
+
+    def shutdown(self):
+        self.finished = True
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+
+    def serve_forever(self):
+        while not self.finished:
+            self.handle_request()
+
+def cache(params):
+    """This function caches the remote file."""
+    client_ip = params.get('client_ip', '-')
+    video_id = params.get('video_id', '-')
+    website_id = params.get('website_id', '-')
+    urls = params.get('urls', [])
+    try:
+        if video_id == '-' or website_id == '-' or len(urls) == 0:
+            error( { 'code' : VIDEO_INFO_ERR, 'message' : 'Enough video information was not available in cache thread.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip } )
+            return
+
+        for dir in o.base_dirs[website_id]:
+            if os.path.isfile(os.path.join(dir, video_id)):
+                info({ 'code' : VIDEO_EXISTS, 'message' : 'Video already exists in one of the cache directories.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip })
+                return
+        eval('cache_' + website_id + '_video(params)')
+        return
+    except Exception, e:
+        error( {'code' : CACHE_THREAD_ERR, 'message' : 'Error in cache thread.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip} )
+        trace( {'code' : CACHE_THREAD_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip} )
+
+def cache_remote_url(remote_url, target_file, params = {}):
+    client_ip = params.get('client_ip', '-')
+    video_id = params.get('video_id', '-')
+    website_id = params.get('website_id', '-')
+
+    if o.proxy:
+        urllib2.install_opener(urllib2.build_opener(urllib2.ProxyHandler( { 'http' : o.proxy, 'https' : o.proxy, 'ftp' : o.proxy } )))
+    request = urllib2.Request(remote_url, None, o.std_headers)
+
+    try:
+        connection = urllib2.urlopen(request)
+        try:
+            conn_info = connection.info()
+            video_size = int(conn_info.get('content-length', -1))
+            if video_size == -1:
+                info( { 'code' : VIDEO_SIZE_NOT_SUPPLIED, 'message' : 'Video size was not supplied by the remote server.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            elif o.max_video_size != 0 and o.min_video_size != 0:
+                if video_size > o.max_video_size:
+                    info( { 'code' : VIDEO_TOO_LARGE, 'message' : 'Video size is large than the specified max video size allowed. Skipping.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+                    return False
+                if video_size < o.min_video_size:
+                    info( { 'code' : VIDEO_TOO_SMALL, 'message' : 'Video size is smaller than the specified min video size allowed. Skipping.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+                    return False
+        except Exception, e:
+            warn( { 'code' : CONNECTION_INFO_ERR, 'message' : 'Error while getting connection information.', 'debug' : str(e), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            trace( { 'code' : CONNECTION_INFO_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+
+        file = None
+        start_time = time.time()
+        downloaded = 0
+        while True:
+            block = connection.read(16384)
+            if len(block) == 0:
+                break
+            if not file:
+                file = open(target_file, 'wb')
+            file.write(block)
+
+            downloaded += len(block)
+            while o.max_cache_speed > 0 and downloaded / (time.time() - start_time) > o.max_cache_speed:
+                time.sleep(0.2)
+        if file:
+            file.close()
+
+        if video_size != -1 and os.path.getsize(target_file) / 1024 < 0.97 * video_size / 1024:
+            error( { 'code' : PARTIAL_CACHE_ERR, 'message' : 'Video could not be cached completely. Expected: ' + str(video_size) + ', Got: ' + str(os.path.getsize(target_file)), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            return False
+    except urllib2.HTTPError, e:
+        try:
+            error( { 'code' : CACHE_HTTP_ERR, 'message' : 'HTTP error : ' + str(e.code) + '. An error occured while caching the video at '  + remote_url + '.', 'debug' : str(e), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            trace( { 'code' : CACHE_HTTP_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            return False
+        except:
+            error( { 'code' : CACHE_HTTP_ERR, 'message' : 'HTTP error. An error occured while caching the video at '  + remote_url + '.', 'debug' : str(e), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            trace( { 'code' : CACHE_HTTP_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            return False
+    except Exception, e:
+        error( { 'code' : CACHE_ERR, 'message' : 'Could not cache the video at ' + remote_url + '.', 'debug' : str(e), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+        trace( { 'code' : CACHE_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+        return False
+    return True
+
+def cache_youtube_video(params):
+    mode = 0644
+    client_ip = params.get('client_ip', '-')
+    video_id = params.get('video_id', '-')
+    website_id = params.get('website_id', '-')
+    format = params.get('format', '')
+    urls = params.get('urls', [])
+    cur_cache_dir = params.get('cur_cache_dir', None)
+
+    if video_id == '-' or website_id == '-' or cur_cache_dir == None or len(urls) == 0:
+        error( { 'code' : VIDEO_INFO2_ERR, 'message' : 'Enough video information was not available in cache thread.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip } )
+        return
+
+    if o.proxy:
+        urllib2.install_opener(urllib2.build_opener(urllib2.ProxyHandler( { 'http' : o.proxy, 'https' : o.proxy, 'ftp' : o.proxy } )))
+    request = urllib2.Request('http://www.youtube.com/watch?v=%s&gl=US&hl=en' % video_id, None, o.std_headers)
+
+    try:
+        webpage = urllib2.urlopen(request).read()
+    except Exception, e:
+        error( { 'code' : VIDEO_PAGE_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Error while fetching video webpage.', 'debug' : str(e) } )
+        trace( { 'code' : VIDEO_PAGE_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+        return
+
+    for el in ['&el=detailpage', '&el=embedded', '&el=vevo', '']:
+        info_url = 'http://www.youtube.com/get_video_info?video_id=%s%s&ps=default&eurl=&gl=US&hl=en' % (video_id, el)
+        request = urllib2.Request(info_url, None, o.std_headers)
+        try:
+            info_page = urllib2.urlopen(request).read()
+            video_info = cgi.parse_qs(info_page)
+            try:
+                view_count = int(video_info.get('view_count', [0])[0])
+            except Exception, e:
+                view_count = 0
+            if view_count < o.min_youtube_views:
+                info( { 'code' : VIEW_COUNT_LOW, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Video has not received enough views and will not be cached.' } )
+                return
+            if 'url_encoded_fmt_stream_map' in video_info:
+                break
+        except Exception, e:
+            error({'code' : VIDEO_INFO_FETCH_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Error occured while fetching video info..', 'debug' : str(e) } )
+            trace( { 'code' : VIDEO_INFO_FETCH_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+            return
+
+    alternate_vid = None
+    video_url = None
+    try:
+        if 'url_encoded_fmt_stream_map' in video_info:
+            url_map = {}
+            [url_map.update({i['itag'][0] : i['url'][0]}) for i in [cgi.parse_qs(i) for i in filter(lambda x: not re.compile(urllib.quote_plus('video/webm')).search(x), video_info['url_encoded_fmt_stream_map'][0].split(','))]]
+            alternate_url = url_map.values()[0]
+
+            if format != '':
+                video_url = url_map['18']
+            else:
+                for fmt in o.youtube_video_formats:
+                    if fmt != 18 and url_map.has_key(str(fmt)):
+                        video_url = url_map[str(fmt)]
+                        break
+
+            if not video_url:
+                video_url = alternate_url
+
+            alternate_vid = get_youtube_video_id(video_url)
+    except Exception, e:
+        error( { 'code' : ALTERNATE_VIDEO_ID_ERROR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Error while extracting alternate video id.', 'debug' : str(e) } )
+        trace( { 'code' : ALTERNATE_VIDEO_ID_ERROR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+
+
+    if not video_url or not alternate_vid:
+        error( { 'code' : VIDEO_URL_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Could not determine video URL.' } )
+        return
+
+    cache_dir = os.path.join(cur_cache_dir, website_id)
+    tmp_dir = os.path.join(cur_cache_dir, o.temp_dir)
+
+    video_path = os.path.join(cache_dir, alternate_vid) + format
+    tmp_path = os.path.join(tmp_dir, alternate_vid) + format
+
+    try:
+        if not os.path.exists(video_path):
+            if cache_remote_url(video_url, tmp_path, params):
+                size = os.path.getsize(tmp_path)
+                os.rename(tmp_path, video_path)
+                os.chmod(video_path, mode)
+                os.utime(video_path, None)
+                info( { 'code' : VIDEO_CACHED, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'size' : size, 'message' : 'Video was cached successfully.' } )
+            else:
+                return
+        else:
+            info({ 'code' : VIDEO_EXISTS, 'message' : 'Video already exists at ' + video_path + '.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip })
+
+        try:
+            new_video_path = os.path.join(cache_dir, video_id) + format
+            if new_video_path is not None:
+                if not os.path.exists(new_video_path):
+                    os.link(video_path, new_video_path)
+                os.utime(new_video_path, None)
+        except Exception, e:
+            error( { 'code' : VIDEO_LINK_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Could not link video to alternate video id.', 'debug' : str(e) } )
+            trace( { 'code' : VIDEO_LINK_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+        return
+    except Exception, e:
+        error( { 'code' : URL_CACHE_ERR, 'message' : 'Failed to cache video at ' + video_url + '.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+        trace( { 'code' : URL_CACHE_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+    return
+
+def cache_dailymotion_video(params):
+    mode = 0644
+    client_ip = params.get('client_ip', '-')
+    video_id = params.get('video_id', '-')
+    website_id = params.get('website_id', '-')
+    format = params.get('format', '')
+    urls = params.get('urls', [])
+    cur_cache_dir = params.get('cur_cache_dir', None)
+
+    if video_id == '-' or website_id == '-' or cur_cache_dir == None or len(urls) == 0:
+        error( { 'code' : VIDEO_INFO2_ERR, 'message' : 'Enough video information was not available in cache thread.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip } )
+        return
+
+    video_url = None
+    alternate_vid = None
+
+    if o.proxy:
+        urllib2.install_opener(urllib2.build_opener(urllib2.ProxyHandler( { 'http' : o.proxy, 'https' : o.proxy, 'ftp' : o.proxy } )))
+    request = urllib2.Request(urls[0], None, o.std_headers)
+
+    try:
+        page_data = urllib2.urlopen(request).read()
+        if page_data:
+            page_data = urllib2.unquote(page_data).replace('\\/', '/')
+            search_sdurl = re.compile('"sdURL":"([^"]*)"').search(page_data)
+            if search_sdurl:
+                video_url = search_sdurl.group(1)
+            else:
+                search_hqurl = re.compile('"hqURL":"([^"]*)"').search(page_data)
+                if search_hqurl:
+                    video_url = search_hqurl.group(1)
+
+        if video_url:
+            request = urllib2.Request(video_url, None, o.std_headers)
+            webpage = urllib2.urlopen(request)
+            if webpage and webpage.url != '':
+                path = urlparse.urlsplit(webpage.url)[2]
+                alternate_vid = path.strip('/').split('/')[-1]
+    except Exception, e:
+        error( { 'code' : VIDEO_PAGE_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Error while fetching video webpage.', 'debug' : str(e) } )
+        trace( { 'code' : VIDEO_PAGE_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+        return
+
+    if not video_url:
+        error( { 'code' : VIDEO_URL_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Could not determine video URL.' } )
+        return
+
+    cache_dir = os.path.join(cur_cache_dir, website_id)
+    tmp_dir = os.path.join(cur_cache_dir, o.temp_dir)
+
+    video_path = os.path.join(cache_dir, video_id)
+    tmp_path = os.path.join(tmp_dir, video_id)
+
+    try:
+        if not os.path.exists(video_path):
+            if cache_remote_url(video_url, tmp_path, params):
+                size = os.path.getsize(tmp_path)
+                os.rename(tmp_path, video_path)
+                os.chmod(video_path, mode)
+                os.utime(video_path, None)
+                info( { 'code' : VIDEO_CACHED, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'size' : size, 'message' : 'Video was cached successfully.' } )
+            else:
+                return
+        else:
+            info({ 'code' : VIDEO_EXISTS, 'message' : 'Video already exists at ' + video_path + '.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip })
+
+        try:
+            new_video_path = os.path.join(cache_dir, alternate_vid)
+            if new_video_path is not None:
+                if not os.path.exists(new_video_path):
+                    os.link(video_path, new_video_path)
+                os.utime(new_video_path, None)
+        except Exception, e:
+            error( { 'code' : VIDEO_LINK_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : 'Could not link video to alternate video id.', 'debug' : str(e) } )
+            trace( { 'code' : VIDEO_LINK_ERR, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'message' : traceback.format_exc() } )
+        return
+    except Exception, e:
+        error( { 'code' : URL_CACHE_ERR, 'message' : 'Failed to cache video at ' + video_url + '.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+        trace( { 'code' : URL_CACHE_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+    return
+
+def cache_generalized(params):
+    # The expected mode of the cached file, so that it is readable by apache
+    # to stream it to the client.
+    mode = 0644
+    client_ip = params.get('client_ip', '-')
+    video_id = params.get('video_id', '-')
+    website_id = params.get('website_id', '-')
+    urls = params.get('urls', [])
+    cur_cache_dir = params.get('cur_cache_dir', None)
+
+    if video_id == '-' or website_id == '-' or cur_cache_dir == None or len(urls) == 0:
+        error( { 'code' : VIDEO_INFO2_ERR, 'message' : 'Enough video information was not available in cache thread.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip } )
+        return
+
+    cache_dir = os.path.join(cur_cache_dir, website_id)
+    tmp_dir = os.path.join(cur_cache_dir, o.temp_dir)
+
+    video_path = os.path.join(cache_dir, video_id)
+    tmp_path = os.path.join(tmp_dir, video_id)
+
+    for url in urls:
+        original_url = url
+        url = refine_url(url, o.arg_drop_list[website_id])
+        try:
+            if not os.path.exists(video_path):
+                if cache_remote_url(url, tmp_path, params):
+                    size = os.path.getsize(tmp_path)
+                    os.rename(tmp_path, video_path)
+                    os.chmod(video_path, mode)
+                    os.utime(video_path, None)
+                    info( { 'code' : VIDEO_CACHED, 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip, 'size' : size, 'message' : 'Video was cached successfully. ' + str(size) } )
+                    return
+            else:
+                info({ 'code' : VIDEO_EXISTS, 'message' : 'Video already exists at ' + video_path + '.', 'website_id' : website_id, 'video_id' : video_id, 'client_ip' : client_ip })
+            return
+        except Exception, e:
+            error( { 'code' : URL_CACHE_ERR, 'message' : 'Failed to cache video at ' + original_url + '.', 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+            trace( { 'code' : URL_CACHE_ERR, 'message' : traceback.format_exc(), 'video_id' : video_id, 'website_id' : website_id, 'client_ip' : client_ip } )
+    return
+
+cache_aol_video = cache_generalized
+cache_bing_video = cache_generalized
+cache_bliptv_video = cache_generalized
+cache_break_video = cache_generalized
+cache_facebook_video = cache_generalized
+cache_metacafe_video = cache_generalized
+cache_myspace_video = cache_generalized
+cache_vimeo_video = cache_generalized
+cache_wrzuta_video = cache_generalized
+
+# Pr0n sites
+cache_redtube_video = cache_generalized
+cache_tube8_video = cache_generalized
+cache_xtube_video = cache_generalized
+cache_youporn_video = cache_generalized
+
+def refine_cache_periods():
+    global cache_periods
+    cache_periods = []
+    if o.cache_periods == False:
+        warn({ 'code' : CACHE_PERIOD_WARN, 'message' : 'Error in parsing the value of the option cache_period. Ignoring. Please set cache_period option in /etc/videocache.conf properly and restart vc-scheduler.'})
+        cache_periods = []
+    elif o.cache_periods == None:
+        cache_periods = []
+    else:
+        for cp in o.cache_periods:
+            if cp['start'][0] > cp['end'][0]:
+                warn({ 'code' : CACHE_PERIOD_WARN, 'message' : 'A time period mentioned using cache_period option is not valid. Ignoring. Please set cache_period option in /etc/videocache.conf properly and restart vc-scheduler.', 'debug' : cache_period_h2s(cp)})
+            else:
+                cache_periods.append(cp)
+
+def is_caching_time():
+    if len(cache_periods) == 0:
+        return True
+
+    t = time.localtime()
+    for cp in cache_periods:
+        start_time = int('%02d%02d' % (cp['start'][0], cp['start'][1]))
+        end_time = int('%02d%02d' % (cp['end'][0], cp['end'][1]))
+        cur_time = int('%02d%02d' % (t.tm_hour, t.tm_min))
+        if cur_time >= start_time and cur_time <= end_time:
+            return True
+    return False
+
+def cache_thread_scheduler():
+    if o.client_email != '':
+        info( { 'code' : CACHE_THREAD_SCHEDULER_START, 'message' : 'Starting cache thread scheduler.' } )
+        refine_cache_periods()
+        connection()
+        while True:
+            try:
+                video_pool.load_queue()
+                info( { 'code' : QUEUE_LOAD, 'message' : 'Video queue loaded from dump file.' } )
+                break
+            except Exception, e:
+                warn({ 'code' : QUEUE_LOAD_WARN, 'message' : 'Error in loading video queue.', 'debug' : str(e)})
+                trace({ 'code' : QUEUE_LOAD_WARN, 'message' : traceback.format_exc() })
+                time.sleep(5)
+                connection()
+
+        while True:
+            try:
+                num_tries = 0
+                while num_tries < 5:
+                    try:
+                        video_pool.schedule()
+                        break
+                    except Exception, e:
+                        connection()
+                    num_tries += 1
+                    time.sleep(min(2 ** num_tries, 10))
+                else:
+                    warn({ 'code' : CACHE_THREAD_SCHEDULE_FAIL, 'message' : 'Could not schedule a cache thread in ' + str(num_tries) + ' tries. Please check RPC server status using vc-scheduler command.' })
+            except Exception, e:
+                warn({ 'code' : CACHE_THREAD_SCHEDULE_WARN, 'message' : 'Error in scheduling a cache thread. Continuing.', 'debug' : str(e)})
+                trace({ 'code' : CACHE_THREAD_SCHEDULE_WARN, 'message' : traceback.format_exc() })
+            time.sleep(5)
+    else:
+        warn( { 'code' : 'RRE_LIAME_TNEILC'[::-1], 'message' : '.reludehcs-cv tratser ,oslA .diuqS tratser/daoler dna noitpo siht teS .tes ton si fnoc.ehcacoediv/cte/ ni liame_tneilc noitpo ehT'[::-1] } )
+
+
+def submit_system_info():
+    time.sleep(20)
+    submit_period = 1800
+    while True:
+        if o.client_email != '':
+            num_tries = 0
+            systems = []
+            while num_tries < 5:
+                try:
+                    video_pool.ping()
+                    systems = video_pool.get_systems()
+                    break
+                except Exception, e:
+                    connection()
+
+                time.sleep(min(2 ** num_tries, 10))
+                num_tries += 1
+
+            if len(systems) != 0:
+                cookie_handler = urllib2.HTTPCookieProcessor()
+                redirect_handler = urllib2.HTTPRedirectHandler()
+                info_opener = urllib2.build_opener(redirect_handler, cookie_handler)
+                okay = True
+                for system in systems:
+                    new_info = {}
+                    for k,v in system.items():
+                        new_info['[server][' + k + ']'] = v
+
+                    status = info_opener.open(o.info_server, urllib.urlencode(new_info)).read()
+                    if status != 'OK':
+                        okay = False
+                if okay:
+                    submit_period = 1800
+                else:
+                    submit_period = 600
+        else:
+            warn( { 'code' : 'RRE_LIAME_TNEILC'[::-1], 'message' : '.reludehcs-cv tratser ,oslA .diuqS tratser/daoler dna noitpo siht teS .tes ton si fnoc.ehcacoediv/cte/ ni liame_tneilc noitpo ehT'[::-1] } )
+            submit_period = 3600
+
+        time.sleep(submit_period)
+
+def start_scheduler_server():
+    server = VideoPoolRPCServer((o.rpc_host, int(o.rpc_port)), logRequests=0)
+    server.register_function(server.shutdown)
+    server.register_introspection_functions()
+    server.register_instance(VideoPool())
+    info( { 'code' : VIDEO_POOL_SERVER_START, 'message' : 'Starting VideoPool Server at port ' + str(o.rpc_port) + '.' } )
+    server.serve_forever()
+
+def scheduler_server_heartbeat():
+    while True:
+        num_tries = 0
+        while num_tries < 5:
+            try:
+                start_scheduler_server()
+            except Exception, e:
+                time.sleep(min(2 ** num_tries, 5))
+                trace( { 'code' : VIDEO_POOL_SERVER_START_ERR, 'message' : traceback.format_exc() } )
+
+            num_tries += 1
+        else:
+            error( { 'code' : VIDEO_POOL_SERVER_START_ERR, 'message' : 'Video Pool Server (RPC Server) is crashing time and again. Please check if there any other program listening on port 9100. If so, close/kill that program and then restart vc-scheduler or set rpc_port option in /etc/videocache.conf to a different value.' } )
+
+        time.sleep(30)
+
+class VideoPoolDaemon(VideocacheDaemon):
+
+    def __init__(self, o = None, **kwargs):
+        self.o = o
+        VideocacheDaemon.__init__(self, o.scheduler_pidfile, name = 'Videocache Scheduler', **kwargs)
+
+    def run(self):
+        global process_id
+        try:
+            self.o.set_loggers()
+            process_id = os.getpid()
+
+            server_thread = threading.Thread(target = scheduler_server_heartbeat)
+            cache_thread = threading.Thread(target = cache_thread_scheduler)
+            sysinfo_thread = threading.Thread(target = submit_system_info )
+
+            server_thread.start()
+            cache_thread.start()
+            sysinfo_thread.start()
+
+            server_thread.join()
+            cache_thread.join()
+            sysinfo_thread.join()
+        except Exception, e:
+            error( { 'code' : VIDEO_POOL_SERVER_START_ERR, 'message' : 'Error while starting VideoPool server at port ' + str(self.o.rpc_port) + '.' } )
+            trace( { 'code' : VIDEO_POOL_SERVER_START_ERR, 'message' : traceback.format_exc() } )
+
+def flush_scheduler_queue():
+    running = True
+    o.set_loggers()
+    connection()
+    try:
+        video_pool.ping()
+    except Exception, e:
+        running = False
+
+    if running:
+        try:
+            video_pool.ping()
+            video_pool.flush()
+            video_pool.dump_queue(True)
+            info({'code' : QUEUE_FLUSH, 'message' : 'Videocache scheduler queue has been flushed. Active connections (if any) will however continue till the videos are cached.'})
+            sys.stdout.write('Videocache scheduler queue has been flushed. Active connections (if any) will however continue till the videos are cached.\n')
+            sys.exit(0)
+        except Exception, e:
+            error( { 'code' : QUEUE_FLUSH_ERR, 'message' : 'Error while flushing videocache scheduler queue.', 'debug' : str(e) } )
+            trace( { 'code' : QUEUE_FLUSH_ERR, 'message' : traceback.format_exc() } )
+            sys.stderr.write('Error while flushing videocache scheduler queue.\n')
+            sys.exit(1)
+    else:
+        removed = True
+        for dir in o.base_dir_list:
+            queue_file = os.path.join(dir, o.queue_dump_file)
+            if os.path.isfile(queue_file):
+                try:
+                    os.unlink(queue_file)
+                except Exception, e:
+                    error( { 'code' : QUEUE_FLUSH_ERR, 'message' : 'Error while remove videocache scheduler queue dump file at ' + queue_file + '.', 'debug' : str(e) } )
+                    trace( { 'code' : QUEUE_FLUSH_ERR, 'message' : traceback.format_exc() } )
+                    sys.stderr.write('Error while remove videocache scheduler queue dump file at ' + queue_file + '.\n')
+                    removed = False
+
+        if removed:
+            info({'code' : QUEUE_FLUSH, 'message' : 'Videocache scheduler queue has been flushed.'})
+            sys.stdout.write('Videocache scheduler queue has been flushed.\n')
+            sys.exit(0)
+        else:
+            error( { 'code' : QUEUE_FLUSH_ERR, 'message' : 'Error while flushing videocache scheduler queue. There might have been a file permission issue.' } )
+            sys.stderr.write('Error while flushing videocache scheduler queue. There might have been a file permission issue.\n')
+            sys.exit(1)
+
+if __name__ == '__main__':
+    # Parse command line options.
+    parser = OptionParser()
+    parser.add_option('-p', '--prefix', dest = 'vc_root', type='string', help = 'Specify an alternate root location for videocache', default = '/')
+    parser.add_option('-c', '--config', dest = 'config_file', type='string', help = 'Use an alternate configuration file', default = '/etc/videocache.conf')
+    parser.add_option('-s', '--signal', dest = 'sig', type='string', help = 'Send one of the following signals. start, stop, restart, kill')
+    options, args = parser.parse_args()
+
+    if options.sig:
+        try:
+            o = VideocacheOptions(options.config_file, options.vc_root)
+        except Exception, e:
+            message = 'Could not load Videocache configuration file. \nDebugging output: \n' + traceback.format_exc()
+            syslog_msg(message.replace('\n', ''))
+            sys.stderr.write(message)
+            sys.exit(1)
+
+        uid = None
+        try:
+            uid = pwd.getpwnam( o.videocache_user ).pw_uid
+        except Exception, e:
+            pass
+        if uid == None:
+            message = 'Could not determine User ID for videocache user ' + o.videocache_user + '. \nDebugging output: \n' + traceback.format_exc()
+            syslog_msg(message.replace('\n', ''))
+            sys.stderr.write(message)
+            sys.exit(1)
+
+        daemon = VideoPoolDaemon(o, uid = uid)
+
+        video_pool = None
+        exit = False
+        process_id = '-'
+        stdout = sys.stdout
+        stderr = sys.stderr
+
+        if options.sig == 'start':
+            daemon.start()
+        elif options.sig == 'stop':
+            daemon.stop()
+        elif options.sig == 'restart':
+            daemon.restart()
+        elif options.sig == 'kill':
+            daemon.kill()
+        elif options.sig == 'status':
+            daemon.status()
+        elif options.sig == 'flush':
+            os.setgid(uid)
+            os.setuid(uid)
+            flush_scheduler_queue()
+        else:
+            sys.stderr.write('Unknown signal received. See --help for more options.\n')
+    else:
+        parser.print_help()
+        sys.stderr.write('\nNothing to do. Exit.\n')
+        sys.exit(0)
+

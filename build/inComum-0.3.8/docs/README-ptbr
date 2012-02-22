@@ -1,0 +1,22 @@
+inComum 0.3.8
+=======
+Plugin para Squid (e Lusca) a ser usado com o recurso storeurl_rewrite_program.
+Seu objetivo é criar uma ligação entre URLs em domínios diferentes, mas equivalentes.
+Isto permite a você fazer cache de URLs de diferentes, mas com o mesmo conteúdo.
+Ex: vídeos do youtube, downloads do avast, etc.
+
+Alguns sites (como youtube) inserem cabeçalhos HTTP para impedir o cache (ou, pelo menos, para reduzi-lo).
+Por isso, este programa funciona melhor quando o Squid está compilado com a diretiva
+--enable-http-violations.
+
+Você pode verificar isso digitando % squid -v.
+Caso não esteja com a diretiva instalada (e esteja usando debian), você pode seguir
+o tutorial que acompanha esta documentação.
+
+Página do Projeto
+http://sourceforge.net/projects/incomum/
+
+inComum Team:
+Luciano Pinheiro (lucianopinheiro@users.sourceforge.net)
+Robson F. Ramaldes
+Vitor Feitoza

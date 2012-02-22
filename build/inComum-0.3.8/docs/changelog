@@ -1,0 +1,74 @@
+Changelog
+=========
+
+0.3.8 (2012-02-02)
+-----
+Config fixed for: avast, tumblr, ytimg, ggpht, photobucket, globo.com
+blip.tv fixed.
+AVG added.
+
+0.3.7 (2012-01-24)
+-----
+Youtube updated. Thanks to Robson F. Ramaldes.
+VideoBB.com added. Thanks to Robson F. Ramaldes.
+TVUol fixed.
+
+0.3.6 (2012-01-11)
+-----
+Xvideos added. Thanks to Robson F. Ramaldes.
+Redtube fixed. Thanks to Antonio Modesto.
+Porntube added. Thanks to Antonio Modesto.
+TerraTV removed (not using TCP anymore).
+Vimeo fixed.
+
+0.3.5
+-----
+Redtube updated.
+
+0.3.4
+-----
+Added youtube images, tumblr, ggpht and photobucket. Thanks to Marcos Scheinpflug.
+Added agressive refresh pattern (not activated)
+
+0.3.3.2
+-------
+Fixed "ACL all" problem with config file inComum.conf.
+ENABLE_BOOST Option.
+
+0.3.3.1
+-------
+Fixed problem with "reg" pointer. Thanks to Luiz Antonio Pereira.
+
+0.3.3
+-----
+Added terratv, metacafe and redtube videos.
+Added C regex.
+Added ignore-private option.
+Created inComum.conf config file.
+
+0.3.2
+-----
+Added globo.com video. Thanks to Danilo F. and V. Feitoza.
+Optimized for --enable-http-violations
+Some functions rewritten. Some code relocated.
+added -v version check parameter.
+
+0.3.1
+-----
+missing reference to blip.tv in install-ptbr.txt refresh patterns.
+more compatible with amd64 (unsigned int changed to std::string::size_type).
+
+0.3
+---
+Added blip.tv videos. Thanks to Danillo F.
+
+0.2.4
+-----
+Youtube changed his quality GET var to itag (it was fmt previously) and
+redirection mechanism.
+
+0.2.3
+-----
+Vimeo Videos Added.
+(also a refresh pattern to keep these videos longer)
+
