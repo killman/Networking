@@ -1,0 +1,20 @@
+#!/bin/sh
+#_______________________________________________________________________________
+#    _||  _ _  _ _   _  _
+#   (_||<(_(_)| |_).(/_(_ Enterprise Linux system administration | www.dkcorp.ec
+#_______________|_______________________________________________________________
+#           File:  tcache
+#    Description:  Thundercache 3.1
+#   Requirements:  Gentoo Base System release 2.0.3
+#         Author:  killman
+#          Email:  killman@dkcorp.ec 
+#        Version:  1.0
+#        Created:  lun feb 20 18:22:55 ECT 2012 
+#______________________________________________________________________________
+
+CACHEDIR="/thunder"
+FSIZE="-3M"
+FILE="*.flv"
+find $CACHEDIR -name "$FILE" -size $FSIZE
+find $CACHEDIR -name "$FILE" -size $FSIZE -exec rm -rf {} \;
+echo "Deleted!"
