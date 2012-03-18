@@ -1,0 +1,59 @@
+#!/bin/sh
+#_______________________________________________________________________________
+#    _||  _ _  _ _   _  _
+#   (_||<(_(_)| |_).(/_(_ Enterprise Linux system administration | www.dkcorp.ec
+#_______________|_______________________________________________________________
+#           File:  isp
+#    Description:  Mac filtering
+#   Requirements:  Gentoo Base System release 2.0.3
+#         Author:  killman
+#          Email:  killman@dkcorp.ec 
+#        Version:  1.0
+#        Created:  vie ene 13 21:46:42 ECT 2012 
+#______________________________________________________________________________
+
+IPT="/sbin/iptables"
+NETIFACE="eth0"
+LANIFACE="eth1"
+LOOPBACK="lo"
+IPLB="127.0.0.1"
+IPLN="63.93.9.1"
+PORTCACHE="3128"
+MAC="/etc/dkcorp.ec/mac.sh"
+if [ "$1" == "-d" ]
+then
+	$IPT -F
+	$IPT -t nat -F
+	$IPT -t mangle -F
+
+	#echo "net.ipv4.ip_forward = 1
+	#net.ipv4.icmp_echo_ignore_all = 1
+	#net.ipv4.tcp_syncookies = 1" >> /etc/sysctl.conf
+
+
+
+	$IPT -A INPUT -i $LOOPBACK -j ACCEPT
+	$IPT -A INPUT -s $IPLB -j ACCEPT
+	$IPT -A INPUT -i $NETIFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+	$IPT -t nat -A POSTROUTING -o $NETIFACE -j MASQUERADE
+	$IPT -P FORWARD ACCEPT
+
+	$IPT -t nat -A PREROUTING -s 63.93.9.0/26 -d 0/0 -p tcp -m tcp --dport 80 -j REDIRECT --to-port $PORTCACHE
+	$IPT -t mangle -I OUTPUT -o $LANIFACE -p tcp --dport 8080 -j RETURN
+	$IPT -A OUTPUT -t mangle -m string --string "X-Cache: HIT from Thunder" --algo kmp -j RETURN
+	$IPT -A INPUT -i $NETIFACE -p tcp --dport 22 -j ACCEPT
+	sh $MAC
+
+
+
+
+fi
+
+if [ "$1" == "-k" ]
+then
+
+	$IPT -F
+	$IPT -t nat -F
+	$IPT -t mangle -F
+
+fi
