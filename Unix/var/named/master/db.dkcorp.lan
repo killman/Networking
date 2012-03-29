@@ -1,0 +1,8 @@
+dkcorp.lan.     86400   IN SOA  gw.dkcorp.lan. root.gw.dkcorp.lan. ( 1 10800 3600 6044800 86400 )
+                86400   IN NS   gw.dkcorp.lan.
+
+gw.dkcorp.lan. 	86400   IN   A    10.10.1.1 
+apn.dkcorp.lan.   	86400   IN   A    10.10.1.2
+gentoo.dkcorp.lan.  	86400   IN   A    10.10.1.3 
+dhcp4.dkcorp.ec.lan.   	86400   IN   A    10.10.1.4 
+
